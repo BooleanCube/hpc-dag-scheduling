@@ -1,0 +1,59 @@
+[project]
+name = "hpcctl"
+version = "0.1.0"
+description = "Typer CLI for managing AWS ParallelCluster lifecycles for the HPC DAG scheduling baseline."
+readme = "README.md"
+authors = [
+    { name = "booleancube", email = "samarthupadhya2309@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "jsonschema>=4.26.0",
+    "pyyaml>=6.0.3",
+    "rich>=15.0.0",
+    "typer>=0.27.1",
+]
+
+[project.scripts]
+hpcctl = "hpcctl:main"
+
+[build-system]
+requires = ["uv_build>=0.8.22,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.3",
+    "types-jsonschema>=4.26.0.20260518",
+    "types-pyyaml>=6.0.12.20260815",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "D"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test names and their module docstrings carry the intent; per-test docstrings are noise.
+# Module-level docstrings (D100) are still required.
+"tests/**/*.py" = ["D101", "D102", "D103", "D104", "D105", "D106", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+exclude = ['^\.venv/']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

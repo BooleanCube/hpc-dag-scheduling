@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://booleancube.github.io/hpc-dag-scheduling/schemas/dag_schema.json",
+  "title": "HPC Mathematical DAG Serialization Contract",
+  "description": "Serialization contract linking the Python `/tasks` DAG builder (producer) to the C++ MPI `/engine` (consumer). This document encodes STRUCTURAL validity only. Per the Lazy Evaluation protocol, the Python builder has already proven mathematical and graph-theoretic validity (shape alignment, tensor rank, acyclicity, init completeness) before serialization; a document that validates against this schema is assumed by the engine to be mathematically sound. The engine is responsible only for runtime physics (OOM, MPI deadlock, schema parse failure, Slurm preemption, NaN/Inf). The layout is deliberately flat: a single top-level `nodes` array that a C++ parser (nlohmann::json, RapidJSON) can iterate once, dispatching on the `op` field. There is no recursion and no polymorphic nesting. CURRENT VERSION: 1.2.0. History -- 1.0.0: initial contract. 1.1.0: an empty `shape`/`output_shape` array now denotes a rank-0 (scalar) tensor, which makes the vector-vector case of `dot_product` representable; `init` was still restricted to rank 1 or higher. 1.2.0: adds two primitive ops, `multiply` (elementwise/Hadamard product, two operands of identical shape) and `mod` (elementwise non-negative remainder by a required positive scalar `modulus`), and lifts the 1.1.0 rank-1 floor on `init` so rank-0 source tensors are legal. These three changes exist to support Python-side COMPOSITE operations -- Maclaurin series for sin/cos/exp/sinh/cosh, and binary exponentiation for pow/powmod/matpow -- which expand at build time into subgraphs of primitives. The engine implements only the primitives in the `op` enum and never sees a composite. Every 1.0.0 and 1.1.0 document remains valid under 1.2.0 (all changes are additions or relaxations), but a consumer written against an earlier version must learn the two new `op` values, must handle the `modulus` field, and must be able to handle an empty extent array -- compute element counts as the product of the extents and the rank-0 case resolves itself.",
+  "type": "object",
+  "required": ["metadata", "nodes", "outputs"],
+  "additionalProperties": false,
+  "properties": {
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "nodes": {
+      "type": "array",
+      "description": "Flat list of every node in the DAG. Guaranteed by the producer to be in topological order (see metadata.ordering), so a single forward pass resolves every input reference before it is used. Node `id` values are guaranteed unique by the producer; JSON Schema cannot express that constraint, so the engine may assume it without re-checking.",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "outputs": {
+      "type": "array",
+      "description": "IDs of the nodes whose computed tensors must be materialized and written out at the end of the run. Every entry is guaranteed to name a node present in `nodes`.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nodeId" }
+    }
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object",
+      "description": "Compatibility and provenance block. The engine reads this before touching `nodes` and aborts on a major-version mismatch.",
+      "required": ["schema_version", "dag_id", "ordering"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "description": "Semantic version of THIS contract that the producer targeted. The engine must reject a document whose major version differs from the version it was compiled against; differing minor/patch versions are backward compatible.",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+          "examples": ["1.2.0"]
+        },
+        "dag_id": {
+          "type": "string",
+          "description": "Stable identifier for this DAG instance, used to correlate scheduler traces, engine logs, and result artifacts.",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "ordering": {
+          "const": "topological",
+          "description": "Declares the invariant that `nodes` is topologically sorted. The producer guarantees this; the value is a constant so the engine can assert the contract cheaply rather than performing its own sort."
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 timestamp of serialization."
+        },
+        "description": {
+          "type": "string",
+          "description": "Free-text human description of the workload this DAG represents."
+        },
+        "generator": {
+          "type": "string",
+          "description": "Name and version of the producing builder, e.g. 'tasks-builder 0.3.1'.",
+          "maxLength": 256
+        }
+      }
+    },
+    "nodeId": {
+      "type": "string",
+      "description": "Stable node identifier. Edges are expressed as references to these IDs, never as nested node objects.",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$"
+    },
+    "shape": {
+      "type": "array",
+      "description": "Tensor shape as an ordered list of strictly positive extents. Rank is the array length: rank 1 is a vector, rank 2 a matrix. An EMPTY array denotes rank 0, a single scalar element. The C++ consumer needs no special case for it: the element count of any node is the product of its extents, and the product of an empty list is 1, so a rank-0 buffer allocates exactly one element (this matches NumPy, where `numpy.zeros(()).size == 1`). As of 1.2.0 rank 0 may appear anywhere a shape may: it arises as a DERIVED result from a vector-vector `dot_product`, whose contraction collapses both operands, and it may also be declared directly by an `init` node (the 1.1.0 rank-1 floor on `init` was lifted in 1.2.0 once elementwise `multiply`/`mod` gave rank-0 sources something to feed).",
+      "minItems": 0,
+      "maxItems": 8,
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "dtype": {
+      "type": "string",
+      "description": "Element type of the tensor buffer, used by the engine for allocation sizing and MPI datatype selection.",
+      "enum": ["float32", "float64"]
+    },
+    "hints": {
+      "type": "object",
+      "description": "Optional, non-authoritative scheduling hints. The engine and scheduler may use these for placement and cost modeling; ignoring them entirely must not change the computed result.",
+      "additionalProperties": false,
+      "properties": {
+        "est_flops": {
+          "type": "number",
+          "description": "Producer's estimate of the floating-point operation count for this node.",
+          "minimum": 0
+        },
+        "priority": {
+          "type": "integer",
+          "description": "Relative scheduling priority; higher runs earlier when the dependency graph permits a choice."
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "description": "A single DAG node. Every node declares its own `output_shape` and `dtype` so the engine can preallocate buffers in one pass without reimplementing shape inference; these values are derived and validated by the Python builder.",
+      "required": ["id", "op", "output_shape", "dtype"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/nodeId" },
+        "op": {
+          "type": "string",
+          "description": "Operation discriminator. The engine dispatches on this field.",
+          "enum": ["init", "add", "multiply", "scale", "mod", "dot_product", "cross_product"]
+        },
+        "output_shape": {
+          "$ref": "#/$defs/shape",
+          "description": "Shape of the tensor this node produces, used by the engine to size the output buffer in a single forward pass. For `init` nodes this equals `shape`. May be the empty array (rank 0, one element) for a scalar-producing node such as a vector-vector `dot_product`."
+        },
+        "dtype": { "$ref": "#/$defs/dtype" },
+        "inputs": {
+          "type": "array",
+          "description": "Ordered references to the IDs of this node's operand nodes. Order is significant for non-commutative ops (`dot_product`, `cross_product`). Present on every non-init node and absent on `init` nodes.",
+          "items": { "$ref": "#/$defs/nodeId" }
+        },
+        "seed": {
+          "type": "integer",
+          "description": "PRNG seed for an `init` node. Required on `init` so the Python builder can raise UninitializedNodeError when it is missing, and so runs are bit-reproducible across cluster topologies.",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "shape": {
+          "$ref": "#/$defs/shape",
+          "description": "Explicit shape definition for an `init` node. Required on `init`; its absence is an UninitializedNodeError on the Python side. Equals `output_shape`. Any rank from 0 to 8 is permitted: schema 1.1.0 restricted init to rank 1 or higher on the grounds that no op could consume a rank-0 source, but 1.2.0 added the elementwise `multiply` and `mod` ops and the composite expansions that need rank-0 constants, so that restriction was lifted."
+        },
+        "distribution": {
+          "type": "string",
+          "description": "PRNG distribution used to fill an `init` node. `zeros` and `ones` ignore the seed but still require it, so the engine needs no conditional logic. `ones` doubles as the contract's CONSTANT-TENSOR mechanism: the composite expansions emit an `ones` init to represent the x**0 term of a Maclaurin series and the result of `pow(x, 0)`, since there is no dedicated constant op. There is deliberately no `eye`/identity distribution, which is why `matpow(A, 0)` is rejected by the Python builder rather than expanded.",
+          "enum": ["uniform", "normal", "zeros", "ones"]
+        },
+        "factor": {
+          "type": "number",
+          "description": "Scalar multiplier for a `scale` node. Required on `scale` and forbidden elsewhere."
+        },
+        "modulus": {
+          "type": "number",
+          "description": "Positive scalar modulus for a `mod` node. Required on `mod` and forbidden elsewhere. SEMANTICS FOR THE ENGINE: the result is the NON-NEGATIVE remainder in the half-open interval [0, modulus), i.e. floored (Euclidean) modulo as in Python's `%` and NumPy's `np.mod` -- NOT C's `std::fmod`, which returns a result carrying the sign of the dividend. Since the modulus is always positive, the correction is one branch: `r = std::fmod(a, m); if (r < 0) r += m;`. Floored semantics were chosen over fmod because they are what modular arithmetic means, they keep composite `powmod` expansions mathematically meaningful, and they match the NumPy operator the Python builder mirrors. Note that these are floating-point dtypes, so results are exact only while all operands stay inside the exactly-representable integer range of the dtype (2**53 for float64, 2**24 for float32); the Python builder checks this bound for `powmod`.",
+          "exclusiveMinimum": 0
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional human-readable label for traces and visualizations. Never load-bearing.",
+          "maxLength": 128
+        },
+        "hints": { "$ref": "#/$defs/hints" }
+      },
+      "allOf": [
+        {
+          "description": "init: a source node. Carries a seed, an explicit shape, and a distribution; takes no inputs and no scalar factor.",
+          "if": {
+            "properties": { "op": { "const": "init" } },
+            "required": ["op"]
+          },
+          "then": {
+            "required": ["seed", "shape", "distribution"],
+            "properties": {
+              "inputs": false,
+              "factor": false
+            }
+          },
+          "else": {
+            "required": ["inputs"],
+            "properties": {
+              "seed": false,
+              "shape": false,
+              "distribution": false
+            }
+          }
+        },
+        {
+          "description": "add: elementwise sum of exactly two operands.",
+          "if": {
+            "properties": { "op": { "const": "add" } },
+            "required": ["op"]
+          },
+          "then": {
+            "properties": {
+              "inputs": { "minItems": 2, "maxItems": 2 },
+              "factor": false
+            }
+          }
+        },
+        {
+          "description": "multiply: elementwise (Hadamard) product of exactly two operands. Operand shapes are identical, as for `add`; this is NOT a contraction -- see `dot_product` for that.",
+          "if": {
+            "properties": { "op": { "const": "multiply" } },
+            "required": ["op"]
+          },
+          "then": {
+            "properties": {
+              "inputs": { "minItems": 2, "maxItems": 2 },
+              "factor": false
+            }
+          }
+        },
+        {
+          "description": "mod: exactly one operand reduced elementwise by a required positive scalar modulus. This block also forbids `modulus` on every other op via its `else` branch.",
+          "if": {
+            "properties": { "op": { "const": "mod" } },
+            "required": ["op"]
+          },
+          "then": {
+            "required": ["modulus"],
+            "properties": {
+              "inputs": { "minItems": 1, "maxItems": 1 },
+              "factor": false
+            }
+          },
+          "else": {
+            "properties": {
+              "modulus": false
+            }
+          }
+        },
+        {
+          "description": "scale: exactly one operand multiplied by a required scalar factor.",
+          "if": {
+            "properties": { "op": { "const": "scale" } },
+            "required": ["op"]
+          },
+          "then": {
+            "required": ["factor"],
+            "properties": {
+              "inputs": { "minItems": 1, "maxItems": 1 }
+            }
+          }
+        },
+        {
+          "description": "dot_product: exactly two operands; operand order is significant and alignment (N x M dot M x P) was proven by the producer.",
+          "if": {
+            "properties": { "op": { "const": "dot_product" } },
+            "required": ["op"]
+          },
+          "then": {
+            "properties": {
+              "inputs": { "minItems": 2, "maxItems": 2 },
+              "factor": false
+            }
+          }
+        },
+        {
+          "description": "cross_product: exactly two operands; operand order is significant and rank/extent suitability was proven by the producer.",
+          "if": {
+            "properties": { "op": { "const": "cross_product" } },
+            "required": ["op"]
+          },
+          "then": {
+            "properties": {
+              "inputs": { "minItems": 2, "maxItems": 2 },
+              "factor": false
+            }
+          }
+        }
+      ]
+    }
+  }
+}

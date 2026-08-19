@@ -67,3 +67,98 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# ---------------------------------------------------------------------------
+# Secrets & credentials -- never commit any of these
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.ppk
+id_rsa*
+id_ed25519*
+*.pub
+.aws/
+credentials
+aws_credentials
+.netrc
+*_rsa
+*.p12
+*.pfx
+
+# ---------------------------------------------------------------------------
+# Config files -- cluster/AWS config is environment-driven, not committed.
+# Exceptions below are contract or CI files that MUST be tracked.
+# ---------------------------------------------------------------------------
+*.json
+*.yaml
+*.yml
+
+# /shared is the serialization contract between /tasks and /engine.
+!/shared/**/*.json
+!/shared/**/*.yaml
+# CI definitions must be tracked.
+!/.github/**/*.yml
+!/.github/**/*.yaml
+# Committed templates showing required keys, with placeholder values only.
+!**/*.example.json
+!**/*.example.yaml
+!**/*.example.yml
+# Tooling config that belongs in version control.
+!.pre-commit-config.yaml
+
+# Note: uv.lock is intentionally NOT ignored -- lockfiles are committed.
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+sdist/
+wheels/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.hypothesis/
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------------
+# Editor & OS junk
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.iml
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+Desktop.ini
+*~
+.*.swo
+.direnv/
+
+# ---------------------------------------------------------------------------
+# HPC run artifacts
+# ---------------------------------------------------------------------------
+slurm-*.out
+*.sbatch.generated
+# hpcctl's generated-artifact directory. Its contents are already ignored by
+# extension, but ignoring the directory makes that structural rather than
+# incidental -- otherwise the first .txt log written here becomes committable.
+.hpcctl-run/
+core.*
