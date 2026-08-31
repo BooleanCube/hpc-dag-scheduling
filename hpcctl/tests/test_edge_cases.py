@@ -135,18 +135,50 @@ class TestDeployPreconditions:
     def test_build_path_that_is_a_file_is_rejected(self, runner: CliRunner, tmp_path: Path) -> None:
         not_a_dir = tmp_path / "engine"
         not_a_dir.write_text("oops", encoding="utf-8")
-        result = runner.invoke(cli.app, ["deploy", "--build-dir", str(not_a_dir)], env=blank_env())
+        result = runner.invoke(
+            cli.app, ["deploy", "--dry-run", "--build-dir", str(not_a_dir)], env=blank_env()
+        )
         assert result.exit_code == ExitCode.CONFIG
         assert "not a directory" in result.stderr
 
     def test_large_manifest_is_truncated(self, runner: CliRunner, tmp_path: Path) -> None:
         build = tmp_path / "big"
-        build.mkdir()
+        (build / "bin").mkdir(parents=True)
         for index in range(40):
-            (build / f"lib{index:03d}.so").write_text("x", encoding="utf-8")
-        result = runner.invoke(cli.app, ["deploy", "--build-dir", str(build)], env=blank_env())
+            (build / "bin" / f"lib{index:03d}.so").write_text("x", encoding="utf-8")
+        result = runner.invoke(
+            cli.app, ["deploy", "--dry-run", "--build-dir", str(build)], env=blank_env()
+        )
         assert result.exit_code == 0
         assert "and 15 more" in result.stdout
+
+    def test_build_tree_without_bin_is_rejected(self, runner: CliRunner, tmp_path: Path) -> None:
+        """A build tree holding only CMake artifacts means the build never finished."""
+        build = tmp_path / "build"
+        build.mkdir()
+        (build / "CMakeCache.txt").write_text("x", encoding="utf-8")
+        result = runner.invoke(
+            cli.app, ["deploy", "--dry-run", "--build-dir", str(build)], env=blank_env()
+        )
+        assert result.exit_code == ExitCode.CONFIG
+        assert "holds no binaries" in result.stderr
+
+    def test_only_bin_contents_are_shipped(self, runner: CliRunner, tmp_path: Path) -> None:
+        """CMake cache and object files must never reach the shared filesystem."""
+        build = tmp_path / "build"
+        (build / "bin").mkdir(parents=True)
+        (build / "bin" / "engine").write_bytes(b"\x7fELF")
+        (build / "CMakeCache.txt").write_text("x", encoding="utf-8")
+        (build / "CMakeFiles").mkdir()
+        (build / "CMakeFiles" / "main.cpp.o").write_bytes(b"\x00")
+        result = runner.invoke(
+            cli.app, ["deploy", "--dry-run", "--build-dir", str(build)], env=blank_env()
+        )
+        assert result.exit_code == 0
+        assert "engine" in result.stdout
+        assert "CMakeCache.txt" not in result.stdout
+        assert "main.cpp.o" not in result.stdout
+        assert "would sync 1 file(s)" in result.stderr
 
 
 class TestSchemaHelpers:

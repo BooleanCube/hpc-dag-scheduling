@@ -40,13 +40,13 @@ class TestDefaults:
         assert s.compute_instance_type == "c5.large"
         assert s.queue_name == "compute"
         assert s.min_nodes == 0
-        assert s.max_nodes == 4
+        assert s.max_nodes == 16
         assert s.shared_dir == "/shared"
         assert s.shared_volume_gb == 50
         assert s.bootstrap_prefix == "hpcctl/bootstrap"
         assert s.ssh_user == "ubuntu"
-        assert s.ntasks == 4
-        assert s.nodes == 2
+        assert s.ntasks == 2  # always nodes + 1: scheduler co-located with one worker
+        assert s.nodes == 1
         assert s.time_limit == "00:30:00"
 
     def test_derived_paths_follow_shared_dir(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,8 +65,24 @@ class TestDefaults:
     def test_run_dir_default(self) -> None:
         assert load_settings(live=False).run_dir == Path("./.hpcctl-run")
 
-    def test_engine_build_dir_default(self) -> None:
-        assert load_settings(live=False).engine_build_dir == Path("./engine/build")
+    def test_engine_build_dir_default_is_repo_anchored(self) -> None:
+        """A cwd-relative default made deploy fail from anywhere but the repo root."""
+        build = load_settings(live=False).engine_build_dir
+        assert build.is_absolute()
+        assert build.parts[-2:] == ("engine", "build")
+
+    def test_engine_build_dir_default_ignores_the_working_directory(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        assert load_settings(live=False).engine_build_dir.is_absolute()
+
+    def test_engine_build_dir_honours_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An explicit override is taken verbatim, not re-anchored."""
+        monkeypatch.setenv("HPCCTL_ENGINE_BUILD_DIR", "/opt/engine-build")
+        assert load_settings(live=False).engine_build_dir == Path("/opt/engine-build")
 
     def test_ssh_key_path_is_expanded(self) -> None:
         assert "~" not in load_settings(live=False).ssh_key_path
@@ -175,14 +191,24 @@ class TestLiveResolution:
 
     def test_required_set_is_per_command(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A remote command must not demand the cluster-creation variables."""
-        monkeypatch.setenv("HPCCTL_HEAD_NODE_HOST", "1.2.3.4")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
         settings = load_settings(live=True, required=REQUIRED_FOR_REMOTE)
-        assert settings.head_node_host == "1.2.3.4"
+        assert settings.region == "us-east-1"
+
+    def test_head_node_host_is_never_required(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A stale host is worse than a missing one, so it is discovered rather than demanded.
+
+        The address changes on every cluster re-boot; live commands fill it in from
+        ``pcluster describe-cluster`` when unset (see hpcctl.discovery).
+        """
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        settings = load_settings(live=True, required=REQUIRED_FOR_REMOTE)
+        assert "HPCCTL_HEAD_NODE_HOST" in settings.missing
 
     def test_remote_command_still_fails_without_its_own_variable(self) -> None:
         with pytest.raises(MissingConfigError) as excinfo:
             load_settings(live=True, required=REQUIRED_FOR_REMOTE)
-        assert excinfo.value.variables == ("HPCCTL_HEAD_NODE_HOST",)
+        assert excinfo.value.variables == ("AWS_REGION",)
 
     def test_exit_code_is_config(self) -> None:
         with pytest.raises(MissingConfigError) as excinfo:
@@ -219,9 +245,7 @@ class TestStrict:
 
 
 class TestNumericParsing:
-    @pytest.mark.parametrize(
-        "name", ["HPCCTL_MIN_NODES", "HPCCTL_MAX_NODES", "HPCCTL_NTASKS", "HPCCTL_NODES"]
-    )
+    @pytest.mark.parametrize("name", ["HPCCTL_MIN_NODES", "HPCCTL_MAX_NODES", "HPCCTL_NODES"])
     def test_non_integer_is_rejected(self, name: str, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(name, "lots")
         with pytest.raises(InvalidConfigError, match="must be an integer"):
@@ -236,8 +260,8 @@ class TestNumericParsing:
             load_settings(live=False)
 
     def test_valid_integers_are_parsed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("HPCCTL_MAX_NODES", "16")
-        assert load_settings(live=False).max_nodes == 16
+        monkeypatch.setenv("HPCCTL_MAX_NODES", "32")
+        assert load_settings(live=False).max_nodes == 32
 
     def test_exit_code_is_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HPCCTL_NODES", "x")

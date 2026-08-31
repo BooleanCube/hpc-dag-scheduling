@@ -14,7 +14,7 @@ from hpcctl.external import require_tools, run
 
 
 def destroy(
-    dry_run: DryRunOption = True,
+    dry_run: DryRunOption = False,
     yes: Annotated[
         bool, typer.Option("--yes", help="Skip the confirmation prompt, for automation.")
     ] = False,
@@ -35,7 +35,7 @@ def destroy(
 
     if dry_run:
         console.render_artifact("deletion command (bash)", console.format_command(argv), "bash")
-        console.render_notice("dry-run does not prompt; re-run with --execute to delete")
+        console.render_notice("dry-run does not prompt; re-run without --dry-run to delete")
         console.render_placeholder_warning(settings)
         return
 

@@ -3,200 +3,136 @@
 A research baseline for studying **optimal task scheduling of mathematical Directed Acyclic
 Graphs (DAGs) across an HPC cluster** — AWS ParallelCluster, Slurm, and MPI.
 
----
+## The research problem
 
-## Research Problem Statement
+> **Judge:** a real Slurm cluster · **Verdict:** wall-clock makespan
 
-Given a mathematical workload expressed as a DAG — matrix products, decompositions,
-element-wise kernels, reductions — with data dependencies between nodes, **which scheduling
-strategy minimises makespan on a distributed-memory HPC cluster?**
+You are given:
 
-Answering that honestly requires a measurement rig where the scheduler is the only moving
-part. The dominant obstacle in practice is not the scheduling theory but the *noise*: garbage
-collection pauses, interpreter overhead, dynamic dispatch, and orchestration boilerplate all
-contaminate timing data until the effect of the scheduling policy is no longer separable from
-the effect of the runtime.
+- A **directed acyclic graph** `G = (V, E)`. Each node is one tensor operation from a fixed
+  set of seven primitives (`init`, `add`, `multiply`, `scale`, `mod`, `dot_product`,
+  `cross_product`), with known operand shapes and dtype — so its work `cost(v)` (FLOPs) and
+  its output size `bytes(v)` are computable *before anything runs*. Each edge `u → v` means
+  `v` consumes the tensor `u` produces.
+- **`n` identical machines** joined by a network. A machine runs one node at a time. If `u`
+  and `v` land on different machines, `bytes(u)` must cross the network before `v` can start;
+  on the same machine the hand-off is free.
 
-This project therefore enforces a hard separation:
+Produce a **schedule** — a machine assignment and start order for every node that respects
+the edges — that **minimises the makespan**: the time at which the last node finishes.
 
-- **Python never executes math.** It *builds*, *validates*, and *serialises* the DAG, and it
-  provisions and tears down the cluster. All of this happens before the first MPI rank starts.
-- **C++/MPI never handles logic errors.** By the time the engine receives a DAG, every
-  shape, rank, acyclicity, and initialisation question has already been answered. The engine
-  is free to be a tight, predictable, measurable execution kernel.
+This is classic NP-hard territory (scheduling with precedence and communication delays), so
+every practical answer is a heuristic — list scheduling, critical-path/HEFT, locality-greedy,
+round-robin, work stealing — and every heuristic has a known failure mode. The
+[`/cases`](cases/README.md) suite is the test set: control cases where each naive policy is
+*supposed* to win, and adversarial traps built so it measurably loses. What theory abstracts
+away — MPI latency, memory bandwidth, dtype throughput — is exactly what this rig measures on
+real hardware.
 
-The result is that a scheduling experiment varies one thing — the strategy — while the
-orchestration cost is pushed entirely outside the measured region.
+For the measurement to be honest, the scheduler must be the only moving part, so the project
+enforces a hard separation:
 
----
+- **Python never executes math.** It builds, validates, and serialises the DAG, and it
+  provisions and tears down the cluster — all before the first MPI rank starts.
+- **C++/MPI never handles logic errors.** By the time the engine receives a DAG, every shape,
+  rank, acyclicity, and initialisation question is already answered. The engine is a tight,
+  measurable execution kernel.
 
-## Architecture Overview
+An experiment therefore varies one thing — the strategy — with orchestration cost outside the
+measured region.
+
+## Architecture
 
 ```mermaid
 flowchart TB
     subgraph authoring["Authoring & Validation (Python)"]
-        T["<b>/tasks</b><br/>DAG math builder + node ops<br/>lazy validation, Polars-style"]
+        T["<b>/vmath</b><br/>DAG math builder<br/>lazy math, eager validation"]
     end
-
     subgraph contract["Contract"]
-        S["<b>/shared</b><br/>dag_schema.json<br/>JSON / Protobuf serialization"]
+        S["<b>/shared</b><br/>dag_schema.json"]
     end
-
     subgraph runtime["Execution (C++)"]
-        E["<b>/engine</b><br/>MPI runtime + scheduler<br/><i>human-authored</i>"]
+        E["<b>/engine</b><br/>MPI runtime + scheduler"]
     end
-
     subgraph control["Control Plane (Python)"]
         C["<b>/hpcctl</b><br/>Typer CLI"]
     end
-
     subgraph cloud["AWS ParallelCluster"]
         SL["Slurm controller<br/>+ compute fleet"]
     end
 
     T -- "validated DAG" --> S
-    S -- "deserialised at rank 0" --> E
-    C -- "create / scale / delete<br/>(--dry-run supported)" --> SL
-    C -- "sbatch job submission" --> SL
-    SL -- "launches mpirun" --> E
+    S -- "deserialised by the scheduler rank" --> E
+    C -- "create / submit / fetch / delete" --> SL
+    SL -- "srun --mpi=pmix" --> E
     E -- "timings, makespan, traces" --> R["Scheduling results"]
 
     style E fill:#2d3748,stroke:#1a202c,color:#fff
     style S fill:#744210,stroke:#5f370e,color:#fff
 ```
 
-**Data flow:** `/tasks` builds a DAG and validates it eagerly at *build* time → serialises it
-against the `/shared` contract → `/hpcctl` provisions the cluster and submits the job →
-`/engine` deserialises the DAG and executes it under MPI, emitting scheduling telemetry.
+| Path | What it is | Read this |
+| ---- | ---------- | --------- |
+| [`/cases`](cases/README.md) | 28 benchmark DAGs: controls, scheduler traps, real-world shapes, scale extremes | what each case measures, how to read results |
+| [`/vmath`](vmath/README.md) | NumPy-flavoured DAG builder: 7 primitive ops, composite math (`sin`, `matpow`, …), eager validation, serialization | how to write the math, all ops, all exceptions |
+| [`/hpcctl`](hpcctl/README.md) | Cluster CLI: `boot → deploy → submit → result → destroy` | AWS setup, configuration, lifecycle, design |
+| [`/engine`](engine/README.md) | C++/MPI execution kernel (currently a hello-world stand-in) | the engine contract, how to write the MPI app |
+| `/shared` | `dag_schema.json` — the wire contract linking `/vmath` to `/engine`; changes need both sides | — |
 
----
+**Error contract in one line:** `/vmath` raises `ShapeMismatchError`, `DimensionalityError`,
+`CyclicDependencyError`, and `UninitializedNodeError` at build time (details in
+[`vmath/README.md`](vmath/README.md)); `/engine` handles only runtime physics — OOM, MPI
+failures, schema parsing, preemption, NaN/Inf.
 
-## Components
+## The `hpcctl` lifecycle
 
-| Path       | Language              | Responsibility                                                                                                  | Ownership                            |
-| ---------- | --------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `/engine`  | C++ / MPI             | High-performance execution kernel. Deserialises the DAG, applies the scheduling strategy under test, runs the math, emits timings. | **Human-written. Read-only to automated agents.** |
-| `/hpcctl`  | Python (Typer, `uv`)  | CLI managing the AWS ParallelCluster lifecycle: create, scale, submit, monitor, delete. Every mutating command supports `--dry-run`. | Python team                          |
-| `/tasks`   | Python (NumPy, `uv`)  | DAG math builder, node operations, and concrete task definitions. Performs all logical validation.               | Python team                          |
-| `/shared`  | JSON Schema / Protobuf | The serialization contract linking `/tasks` to `/engine`. Single source of truth for the wire format.            | Shared — changes require both sides   |
+One CLI drives the whole experiment loop:
 
-The `/shared/dag_schema.json` contract defines a DAG document with three required top-level
-members: `metadata`, `nodes`, and `outputs`.
+| Command | What it does | Cost clock |
+| ------- | ------------ | ---------- |
+| `hpcctl boot` | Create the AWS ParallelCluster from `.env` (~15 min) | **$ starts** |
+| `hpcctl deploy` | CMake-build the engine locally, rsync it to `/shared` on the cluster | |
+| `hpcctl submit <case.py \| dag.json>` | Compile + validate the DAG, ship it, `sbatch` it; prints the job ID | compute scales out per job |
+| `hpcctl status` | Cluster state + Slurm queue (`--no-queue` skips SSH) | |
+| `hpcctl result <job id>` | Download logs and every file the engine wrote to `./results/<job id>/` | |
+| `hpcctl destroy` | Delete the cluster (asks for the name to confirm) | **$ stops** |
 
----
+Every command takes `--dry-run` to print exactly what it would do — offline and free — and
+`HPCCTL_DRY_RUN=1` forces dry-run globally.
 
-## Error-Handling Contract
+## Quickstart
 
-This is the load-bearing convention of the project. The DAG builder is **lazily evaluated**
-(construction records intent; nothing computes until the graph is finalised), which means
-Python gets to see the whole graph before anything runs — and is therefore obligated to catch
-every logical error itself.
-
-### Python (`/tasks`) — build time, always
-
-| Exception                 | Raised when                                                                   |
-| ------------------------- | ----------------------------------------------------------------------------- |
-| `ShapeMismatchError`      | Operand dimensions do not align for the operation (e.g. `N×M · P×Q` with `M ≠ P`) |
-| `DimensionalityError`     | Operation applied to the wrong tensor rank (e.g. cross product on a 2-D matrix) |
-| `CyclicDependencyError`   | The graph contains a cycle and is not a valid DAG                              |
-| `UninitializedNodeError`  | An `init` node is missing its PRNG seed or shape definition                    |
-
-All four derive from a common `DagBuildError` base, so callers can catch the category or the
-specific fault. A DAG that fails any of these checks **must never be serialised**.
-
-### C++ (`/engine`) — runtime physics only
-
-The engine is responsible for conditions that are genuinely undecidable ahead of execution:
-
-- Out of memory (OOM)
-- MPI deadlocks and communication failures
-- Schema parsing failures (malformed or version-mismatched input)
-- Slurm preemption
-- NaN / Inf mathematical anomalies
-
-If the engine ever raises a *logical* error, that is a bug in `/tasks`, not in `/engine`.
-
----
-
-## Setup
-
-Both Python projects use [`uv`](https://docs.astral.sh/uv/) exclusively — for environments,
-dependency resolution, and script execution. Do not invoke `pip`, `venv`, or `python` directly.
-
-**Prerequisites:** `uv` (0.8+) and Python 3.11+. `uv` will fetch a suitable interpreter itself
-if one is not present.
-
-### `/tasks` — DAG builder library
+The repository is a [`uv` workspace](https://docs.astral.sh/uv/concepts/workspaces/)
+(`hpcctl` and `vmath` share one lockfile and venv at the root), so every command below runs
+from the repository root — or any subdirectory. For the cluster — one-time AWS setup
+(see [`hpcctl/README.md`](hpcctl/README.md)), then:
 
 ```bash
-cd tasks
-uv sync                 # create .venv and install locked dependencies
-uv run pytest           # run the test suite
-uv run ruff check .     # lint
-uv run ruff format .    # format
-uv run mypy .           # strict type check
+cp hpcctl/.env.example hpcctl/.env && $EDITOR hpcctl/.env   # key pair, subnet, S3 bucket
+set -a && . hpcctl/.env && set +a
+
+uv run hpcctl boot                       # create the cluster (~15 min, $ starts)
+uv run hpcctl deploy                     # build the engine, ship it to /shared
+uv run hpcctl submit cases/wide_skewed_001.py -n 4   # compiles the case, then submits
+uv run hpcctl result <job id>            # download outputs to ./results/<job id>/
+uv run hpcctl destroy                    # $ stops
 ```
 
-### `/hpcctl` — cluster control CLI
+`deploy` reruns the CMake build before every sync, so a fresh clone needs no manual build
+step (`--no-build` ships the existing binaries as-is). `submit` takes a Python case script
+(compiled automatically; see [`/cases`](cases/README.md)) or a pre-serialized DAG JSON as its
+argument; `-n` picks the instance count (default 1, validated against the queue's
+`HPCCTL_MIN_NODES`/`HPCCTL_MAX_NODES` bounds).
 
-```bash
-cd hpcctl
-uv sync
-uv run pytest
-uv run ruff check .
-uv run ruff format .
-uv run mypy .
+Full AWS setup, configuration reference, costs, and design: [`hpcctl/README.md`](hpcctl/README.md).
 
-uv run hpcctl --help    # invoke the CLI
-```
+## Secrets hygiene
 
-### Adding dependencies
-
-```bash
-uv add <package>              # runtime dependency
-uv add --dev <package>        # development dependency
-```
-
-`uv.lock` is committed in both projects and must be kept in sync — commit it alongside any
-`pyproject.toml` change.
-
-### Engineering standards
-
-- **Type checking:** `mypy --strict` must pass with zero errors.
-- **Docstrings:** every function requires a Google-style docstring (enforced by `ruff`'s
-  pydocstyle rules with `convention = "google"`).
-- **Line length:** 100 characters.
-- **Tests:** `pytest`, with high coverage expected.
-- **No side effects:** every AWS-mutating command in `/hpcctl` must implement `--dry-run`,
-  printing the intended payload rather than executing it.
-
-The `/engine` directory is built separately with its own C++ toolchain and is authored by
-humans; it is not managed by `uv`.
-
----
-
-## Secrets Hygiene
-
-**Nothing sensitive is ever committed.** No exceptions.
-
-- AWS credentials, SSH keys, and cluster IP addresses are supplied **exclusively through
-  environment variables** (or the standard AWS credential chain / SSO), never through
-  literals in source, and never through committed config.
-- The root `.gitignore` aggressively excludes `.env` files, `*.pem` / `*.key` / `id_rsa*`
-  keys, `.aws/` and `credentials` files, and all `*.json` / `*.yaml` / `*.yml` config.
-- Deliberate exceptions are un-ignored so the contract and CI remain tracked:
-  `/shared/**/*.json`, `/.github/**/*.yml`, and any `*.example.{json,yaml,yml}` template.
-  Templates must contain **placeholder values only**.
-- `uv.lock` is intentionally tracked; lockfiles are not secrets.
-
-To supply configuration locally, copy a template and fill it in — the copy stays ignored:
-
-```bash
-cp cluster.example.yaml cluster.yaml   # cluster.yaml is git-ignored
-export AWS_PROFILE=my-research-profile
-```
-
----
+Nothing sensitive is ever committed. Credentials, keys, and addresses come exclusively from
+environment variables or the AWS credential chain; the root `.gitignore` excludes `.env`,
+`*.pem`/key files, and all YAML/JSON config, with narrow exceptions for the `/shared`
+contract, CI files, and `*.example.*` templates (placeholders only). Local config lives in
+`hpcctl/.env`, copied from the committed `.env.example` and sourced by you — never auto-loaded.
 
 ## License
 

@@ -37,8 +37,14 @@ REQUIRED_ALWAYS: Final[frozenset[str]] = frozenset(
 )
 """Variables a live cluster-creating command cannot proceed without."""
 
-REQUIRED_FOR_REMOTE: Final[frozenset[str]] = frozenset({"HPCCTL_HEAD_NODE_HOST"})
-"""Additionally required by commands that reach the head node over SSH."""
+REQUIRED_FOR_REMOTE: Final[frozenset[str]] = frozenset({"AWS_REGION"})
+"""Required by commands that reach the head node over SSH.
+
+``HPCCTL_HEAD_NODE_HOST`` is deliberately *not* here: the head node's public IP changes on
+every cluster re-boot, so a required-but-stale value would be worse than a missing one. When
+unset, live commands discover the address from the cluster itself
+(:func:`hpcctl.discovery.resolve_head_node`), which needs only the region.
+"""
 
 REQUIRED_FOR_CLUSTER: Final[frozenset[str]] = frozenset({"AWS_REGION"})
 """Required by commands that only query or delete an existing cluster."""
@@ -104,6 +110,33 @@ def default_schema_path() -> Path:
     return Path("shared") / "dag_schema.json"
 
 
+def default_engine_source_dir() -> Path:
+    """Locate the engine's CMake source tree by walking up from this file.
+
+    Anchored on the repository rather than the working directory: a cwd-relative default made
+    ``hpcctl deploy`` fail from anywhere but the repo root, with a hint that blamed a missing
+    build when the real problem was where the command was run from.
+
+    Returns:
+        ``<repo>/engine`` when the repository root is found, otherwise the relative fallback
+        ``engine`` so the error names something recognisable.
+    """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "engine" / "CMakeLists.txt").is_file():
+            return parent / "engine"
+    return Path("engine")
+
+
+def default_engine_build_dir() -> Path:
+    """Return the default engine build tree, ``<engine source>/build``.
+
+    Returns:
+        The repo-anchored build directory (see :func:`default_engine_source_dir`).
+    """
+    return default_engine_source_dir() / "build"
+
+
 @dataclass(frozen=True)
 class Settings:
     """Resolved configuration for one hpcctl invocation.
@@ -127,13 +160,19 @@ class Settings:
         head_node_host: Hostname or IP of the head node.
         ssh_user: SSH login user on cluster nodes.
         ssh_key_path: Path to the private key. Its *contents* are never printed.
-        engine_build_dir: Local directory holding compiled engine binaries.
+        engine_build_dir: Local engine build tree. Only its ``bin/`` subdirectory is ever
+            deployed. Defaults to ``<repo>/engine/build`` regardless of the working directory.
         remote_engine_dir: Remote directory binaries are synced to.
         remote_dag_dir: Remote directory serialized DAGs are staged in.
         engine_binary: Remote path of the engine executable.
-        ntasks: Default Slurm task count.
-        nodes: Default Slurm node count.
+        ntasks: Default Slurm rank count, always ``nodes + 1``: one scheduler rank co-located
+            with a worker on the first instance, plus one worker per remaining instance. Not
+            environment-configurable — ``submit --ntasks`` overrides it per experiment.
+        nodes: Default compute-instance count.
         time_limit: Default Slurm wall-clock limit.
+        slurm_bin: Directory holding sbatch/squeue on the head node. Needed because the
+            non-interactive shells ``ssh <host> <command>`` spawns never source the profile
+            that puts Slurm on PATH (observed live: ``bash: sbatch: command not found``).
         schema_path: Path to the DAG serialization contract.
         run_dir: Directory generated artifacts are written to.
         missing: Names of required variables that were unset and replaced with placeholders.
@@ -165,6 +204,7 @@ class Settings:
     ntasks: int
     nodes: int
     time_limit: str
+    slurm_bin: str
     schema_path: Path
     run_dir: Path
     missing: tuple[str, ...]
@@ -274,12 +314,17 @@ def load_settings(
     schema_override = os.environ.get("HPCCTL_SCHEMA_PATH", "").strip()
     schema_path = Path(schema_override) if schema_override else default_schema_path()
 
+    build_override = os.environ.get("HPCCTL_ENGINE_BUILD_DIR", "").strip()
+    engine_build_dir = Path(build_override) if build_override else default_engine_build_dir()
+
+    bootstrap_prefix = _env("HPCCTL_BOOTSTRAP_PREFIX", "hpcctl/bootstrap")
+
     blocking = sorted(name for name in missing if name in required)
     if blocking and (live or strict):
         raise MissingConfigError(
             blocking,
             hint=(
-                "Set them in the environment (see hpcctl/.env.example), or drop --execute "
+                "Set them in the environment (see hpcctl/.env.example), or pass --dry-run "
                 "to preview with placeholders."
             )
             if live
@@ -297,21 +342,22 @@ def load_settings(
         compute_instance_type=_env("HPCCTL_COMPUTE_INSTANCE_TYPE", "c5.large"),
         queue_name=_env("HPCCTL_QUEUE_NAME", "compute"),
         min_nodes=_env_int("HPCCTL_MIN_NODES", 0),
-        max_nodes=_env_int("HPCCTL_MAX_NODES", 4),
+        max_nodes=_env_int("HPCCTL_MAX_NODES", 16),
         shared_dir=shared_dir,
         shared_volume_gb=_env_int("HPCCTL_SHARED_VOLUME_GB", 50),
         bootstrap_bucket=bootstrap_bucket,
-        bootstrap_prefix=_env("HPCCTL_BOOTSTRAP_PREFIX", "hpcctl/bootstrap"),
+        bootstrap_prefix=bootstrap_prefix,
         head_node_host=head_node_host,
         ssh_user=_env("HPCCTL_SSH_USER", "ubuntu"),
         ssh_key_path=str(Path(_env("HPCCTL_SSH_KEY_PATH", "~/.ssh/id_rsa")).expanduser()),
-        engine_build_dir=Path(_env("HPCCTL_ENGINE_BUILD_DIR", "./engine/build")),
+        engine_build_dir=engine_build_dir,
         remote_engine_dir=remote_engine_dir,
         remote_dag_dir=remote_dag_dir,
         engine_binary=engine_binary,
-        ntasks=_env_int("HPCCTL_NTASKS", 4),
-        nodes=_env_int("HPCCTL_NODES", 2),
+        ntasks=_env_int("HPCCTL_NODES", 1) + 1,
+        nodes=_env_int("HPCCTL_NODES", 1),
         time_limit=_env("HPCCTL_TIME_LIMIT", "00:30:00"),
+        slurm_bin=_env("HPCCTL_SLURM_BIN", "/opt/slurm/bin"),
         schema_path=schema_path,
         run_dir=Path(_env("HPCCTL_RUN_DIR", "./.hpcctl-run")),
         missing=tuple(missing),

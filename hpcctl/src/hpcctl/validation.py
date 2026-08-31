@@ -1,10 +1,10 @@
 """DAG file validation against the ``/shared`` serialization contract.
 
-``hpcctl`` deliberately does **not** depend on the ``tasks`` package. It validates a serialized
+``hpcctl`` deliberately does **not** depend on the ``vmath`` package. It validates a serialized
 DAG against ``/shared/dag_schema.json`` with ``jsonschema``, exactly as the C++ engine will.
-Importing ``tasks`` would drag NumPy and the whole builder into a tool whose job is to manage EC2
+Importing ``vmath`` would drag NumPy and the whole builder into a tool whose job is to manage EC2
 instances, and would couple the two projects that the ``/shared`` contract exists to decouple.
-If ``tasks`` happens to be importable, it is still not used: one validation path means one set of
+If ``vmath`` happens to be importable, it is still not used: one validation path means one set of
 error messages.
 """
 
@@ -130,7 +130,7 @@ def validate_dag_file(path: Path, *, schema_path: Path | None = None) -> dict[st
     except json.JSONDecodeError as exc:
         raise DagValidationError(
             f"{path} is not valid JSON: {exc.msg} at line {exc.lineno}, column {exc.colno}",
-            hint="Regenerate it with tasks.Graph.to_json().",
+            hint="Regenerate it with vmath.Graph.to_json().",
         ) from exc
 
     schema = load_schema(schema_path)

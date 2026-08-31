@@ -12,7 +12,7 @@ invisible to the entire test suite.
 
 import functools
 from collections.abc import Callable
-from typing import Annotated, Any, TypeVar
+from typing import Annotated, Any
 
 import typer
 
@@ -20,11 +20,10 @@ from hpcctl import console
 from hpcctl.commands.boot import boot
 from hpcctl.commands.deploy import deploy
 from hpcctl.commands.destroy import destroy
+from hpcctl.commands.result import result
 from hpcctl.commands.status import status
 from hpcctl.commands.submit import submit
-from hpcctl.errors import DagValidationError, HpcctlError
-
-F = TypeVar("F", bound=Callable[..., None])
+from hpcctl.errors import DagValidationError, ExternalCommandError, HpcctlError
 
 app = typer.Typer(
     name="hpcctl",
@@ -33,7 +32,7 @@ app = typer.Typer(
 )
 
 
-def handled(command: F) -> F:
+def handled[F: Callable[..., None]](command: F) -> F:
     """Wrap a command so expected failures become clean exits.
 
     Args:
@@ -59,6 +58,11 @@ def handled(command: F) -> F:
             raise typer.Exit(0) from None
         except HpcctlError as err:
             console.render_error(err.message, hint=err.hint)
+            if isinstance(err, ExternalCommandError) and err.stderr:
+                # The command's own diagnostic is usually the actionable part -- pcluster's
+                # validation errors, sbatch's rejection reason. Hiding it sends the operator
+                # off to re-run the command by hand just to see why it failed.
+                console.err().print(err.stderr)
             if isinstance(err, DagValidationError) and err.problems:
                 table = console.new_table("schema violations", "path", "problem")
                 for pointer, message in err.problems:
@@ -80,8 +84,8 @@ def root(
 ) -> None:
     """Manage AWS ParallelCluster lifecycles for the HPC DAG scheduling baseline.
 
-    Every AWS-touching command defaults to a dry-run and needs an explicit ``--execute`` to do
-    anything real. Setting ``HPCCTL_DRY_RUN`` refuses execution globally, even with ``--execute``.
+    Commands execute by default; pass ``--dry-run`` to preview the exact artifacts and shell
+    commands for free. Setting ``HPCCTL_DRY_RUN`` refuses execution globally.
     """
     console.configure(no_color=no_color)
     if verbose:
@@ -99,6 +103,7 @@ def version() -> None:
 app.command()(handled(boot))
 app.command()(handled(deploy))
 app.command()(handled(submit))
+app.command()(handled(result))
 app.command()(handled(status))
 app.command()(handled(destroy))
 

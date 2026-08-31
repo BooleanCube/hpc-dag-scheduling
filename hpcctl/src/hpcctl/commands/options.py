@@ -16,10 +16,16 @@ DryRunOption = Annotated[
     bool,
     typer.Option(
         "--dry-run/--execute",
-        help="Print intended actions instead of performing them. Default: dry-run.",
+        help="Print intended actions instead of performing them. Default: execute.",
     ),
 ]
-"""Every AWS-touching command carries this identical pair."""
+"""Every AWS-touching command carries this identical pair.
+
+Commands default to ``--execute`` (owner's decision, 2026-08-29, now that the pipeline is
+verified): the daily loop should not need a flag per command. ``--dry-run`` previews any
+command for free, and the ``HPCCTL_DRY_RUN`` environment kill switch still forces dry-run
+globally when nobody should be spending money.
+"""
 
 StrictOption = Annotated[
     bool,

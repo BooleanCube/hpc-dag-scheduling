@@ -140,7 +140,9 @@ class TestNoHardcodedCredentials:
 
     def test_generated_artifacts_carry_no_secrets(self, runner: CliRunner, tmp_path: Path) -> None:
         result = runner.invoke(
-            app, ["boot", "--raw"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"), **LIVE_ENV)
+            app,
+            ["boot", "--dry-run", "--raw"],
+            env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"), **LIVE_ENV),
         )
         assert result.exit_code == ExitCode.OK
         for pattern in (r"AKIA", r"-----BEGIN", r"\barn:aws:", r"\b\d{12}\b"):
@@ -151,11 +153,11 @@ class TestNoHardcodedCredentials:
         key = tmp_path / "id_rsa"
         key.write_text("-----BEGIN PRIVATE KEY-----\nADVERSARIALSECRET\n", encoding="utf-8")
         build = tmp_path / "build"
-        build.mkdir()
-        (build / "engine").write_bytes(b"\x7fELF")
+        (build / "bin").mkdir(parents=True)
+        (build / "bin" / "engine").write_bytes(b"\x7fELF")
         result = runner.invoke(
             app,
-            ["deploy", "--build-dir", str(build)],
+            ["deploy", "--dry-run", "--build-dir", str(build)],
             env=blank_env(HPCCTL_SSH_KEY_PATH=str(key), **LIVE_ENV),
         )
         assert result.exit_code == ExitCode.OK
@@ -164,7 +166,11 @@ class TestNoHardcodedCredentials:
 
 
 class TestNothingExecutes:
-    """The central safety rail: no dry-run path may run an external command."""
+    """The central safety rail: no --dry-run path may run an external command.
+
+    Since commands default to --execute, the flag is passed explicitly everywhere here --
+    except --validate-only, which must stay fully local even on the execute path.
+    """
 
     @pytest.fixture
     def no_subprocess(self, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
@@ -196,17 +202,17 @@ class TestNothingExecutes:
             ``(label, argv)`` pairs to drive through the runner.
         """
         return [
-            ("boot default", ["boot"]),
-            ("boot explicit", ["boot", "--dry-run"]),
-            ("boot raw", ["boot", "--raw"]),
-            ("deploy default", ["deploy", "--build-dir", str(build)]),
-            ("submit default", ["submit", "--dag", str(dag)]),
-            ("submit raw", ["submit", "--dag", str(dag), "--raw"]),
-            ("submit validate-only", ["submit", "--dag", str(dag), "--validate-only"]),
-            ("status default", ["status"]),
-            ("status no-queue", ["status", "--no-queue"]),
-            ("destroy default", ["destroy"]),
-            ("destroy yes", ["destroy", "--yes"]),
+            ("boot dry-run", ["boot", "--dry-run"]),
+            ("boot raw", ["boot", "--dry-run", "--raw"]),
+            ("deploy dry-run", ["deploy", "--dry-run", "--build-dir", str(build)]),
+            ("submit dry-run", ["submit", "--dry-run", str(dag)]),
+            ("submit raw", ["submit", "--dry-run", str(dag), "--raw"]),
+            ("submit validate-only", ["submit", str(dag), "--validate-only"]),
+            ("result dry-run", ["result", "42", "--dry-run"]),
+            ("status dry-run", ["status", "--dry-run"]),
+            ("status no-queue", ["status", "--dry-run", "--no-queue"]),
+            ("destroy dry-run", ["destroy", "--dry-run"]),
+            ("destroy dry-run yes", ["destroy", "--dry-run", "--yes"]),
         ]
 
     def test_no_command_executes_in_dry_run(
@@ -260,7 +266,7 @@ class TestNothingExecutes:
         """``HPCCTL_DRY_RUN`` outranks ``--execute``; a flag must not be able to override it."""
         full = list(argv)
         if full[0] == "submit":
-            full += ["--dag", str(valid_dag)]
+            full += [str(valid_dag)]
         if full[0] == "deploy":
             full += ["--build-dir", str(build_dir)]
         result = runner.invoke(
@@ -301,7 +307,7 @@ class TestDestroyRails:
 
     def test_dry_run_never_prompts_even_with_empty_stdin(self, runner: CliRunner) -> None:
         """Prompting here would train the confirmation reflex this UX exists to prevent."""
-        result = runner.invoke(app, ["destroy"], env=blank_env(**LIVE_ENV), input="")
+        result = runner.invoke(app, ["destroy", "--dry-run"], env=blank_env(**LIVE_ENV), input="")
         assert result.exit_code == ExitCode.OK
         assert "Type the cluster name" not in result.stdout
 
@@ -531,7 +537,7 @@ class TestRenderingFidelity:
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         result = runner.invoke(
-            app, ["boot", "--raw"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"))
+            app, ["boot", "--dry-run", "--raw"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"))
         )
         assert result.exit_code == ExitCode.OK
         assert _raw_artifacts(result.stdout)["bootstrap"] == bootstrap_text()
@@ -540,7 +546,7 @@ class TestRenderingFidelity:
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         result = runner.invoke(
-            app, ["boot", "--raw"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"))
+            app, ["boot", "--dry-run", "--raw"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"))
         )
         emitted = _raw_artifacts(result.stdout)["cluster-config"]
         written = (tmp_path / "run" / "hpc-dag-baseline-config.yaml").read_text(encoding="utf-8")
@@ -550,13 +556,15 @@ class TestRenderingFidelity:
         self, runner: CliRunner, tmp_path: Path, wide_console: None
     ) -> None:
         """The negative case that justifies keeping ``--raw`` around."""
-        result = runner.invoke(app, ["boot"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run")))
+        result = runner.invoke(
+            app, ["boot", "--dry-run"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"))
+        )
         assert result.exit_code == ExitCode.OK
         assert bootstrap_text() not in result.stdout
 
     def test_raw_output_carries_no_ansi_escapes(self, runner: CliRunner, tmp_path: Path) -> None:
         result = runner.invoke(
-            app, ["boot", "--raw"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"))
+            app, ["boot", "--dry-run", "--raw"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"))
         )
         assert "\x1b[" not in result.stdout
 
@@ -564,7 +572,7 @@ class TestRenderingFidelity:
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         result = runner.invoke(
-            app, ["boot", "--raw"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"))
+            app, ["boot", "--dry-run", "--raw"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"))
         )
         script = tmp_path / "roundtrip.sh"
         script.write_text(_raw_artifacts(result.stdout)["bootstrap"], encoding="utf-8")
@@ -576,7 +584,7 @@ class TestRenderingFidelity:
         run_dir = tmp_path / "run"
         result = runner.invoke(
             app,
-            ["submit", "--dag", str(valid_dag), "--raw"],
+            ["submit", "--dry-run", str(valid_dag), "--raw"],
             env=blank_env(HPCCTL_RUN_DIR=str(run_dir)),
         )
         assert result.exit_code == ExitCode.OK
@@ -744,7 +752,7 @@ class TestSubmitValidation:
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
         result = runner.invoke(
-            app, ["submit", "--dag", str(tmp_path / "absent.json")], env=blank_env()
+            app, ["submit", "--dry-run", str(tmp_path / "absent.json")], env=blank_env()
         )
         assert result.exit_code == ExitCode.USAGE
 
@@ -753,14 +761,14 @@ class TestSubmitValidation:
     ) -> None:
         bad = tmp_path / "bad.json"
         bad.write_text("{not json", encoding="utf-8")
-        result = runner.invoke(app, ["submit", "--dag", str(bad)], env=blank_env())
+        result = runner.invoke(app, ["submit", "--dry-run", str(bad)], env=blank_env())
         assert result.exit_code == ExitCode.DAG_INVALID
         assert "Traceback" not in result.stdout
 
     def test_json_error_names_the_line_and_column(self, runner: CliRunner, tmp_path: Path) -> None:
         bad = tmp_path / "bad.json"
         bad.write_text('{\n  "metadata": ,\n}', encoding="utf-8")
-        result = runner.invoke(app, ["submit", "--dag", str(bad)], env=blank_env())
+        result = runner.invoke(app, ["submit", "--dry-run", str(bad)], env=blank_env())
         assert result.exit_code == ExitCode.DAG_INVALID
         assert "line" in result.output and "column" in result.output
 
@@ -771,7 +779,7 @@ class TestSubmitValidation:
         document["nodes"][0]["op"] = "transpose"
         path = tmp_path / "badop.json"
         path.write_text(json.dumps(document), encoding="utf-8")
-        result = runner.invoke(app, ["submit", "--dag", str(path)], env=blank_env())
+        result = runner.invoke(app, ["submit", "--dry-run", str(path)], env=blank_env())
         assert result.exit_code == ExitCode.DAG_INVALID
         assert "Traceback" not in result.stdout
 
@@ -784,7 +792,7 @@ class TestSubmitValidation:
         del document["metadata"]["ordering"]
         path = tmp_path / "many.json"
         path.write_text(json.dumps(document), encoding="utf-8")
-        result = runner.invoke(app, ["submit", "--dag", str(path)], env=blank_env())
+        result = runner.invoke(app, ["submit", "--dry-run", str(path)], env=blank_env())
         assert result.exit_code == ExitCode.DAG_INVALID
         assert re.search(r"\d+ problem", result.output)
 
@@ -793,13 +801,13 @@ class TestSubmitValidation:
     ) -> None:
         path = tmp_path / "array.json"
         path.write_text("[]", encoding="utf-8")
-        result = runner.invoke(app, ["submit", "--dag", str(path)], env=blank_env())
+        result = runner.invoke(app, ["submit", "--dry-run", str(path)], env=blank_env())
         assert result.exit_code == ExitCode.DAG_INVALID
 
     def test_empty_file_is_rejected(self, runner: CliRunner, tmp_path: Path) -> None:
         path = tmp_path / "empty.json"
         path.write_text("", encoding="utf-8")
-        result = runner.invoke(app, ["submit", "--dag", str(path)], env=blank_env())
+        result = runner.invoke(app, ["submit", "--dry-run", str(path)], env=blank_env())
         assert result.exit_code == ExitCode.DAG_INVALID
 
     def test_the_rank_zero_case_new_in_1_1_0_validates(
@@ -844,7 +852,7 @@ class TestSubmitValidation:
         path = tmp_path / "rank0.json"
         path.write_text(json.dumps(document), encoding="utf-8")
         result = runner.invoke(
-            app, ["submit", "--dag", str(path), "--validate-only"], env=blank_env()
+            app, ["submit", "--dry-run", str(path), "--validate-only"], env=blank_env()
         )
         assert result.exit_code == ExitCode.OK
 
@@ -885,7 +893,7 @@ class TestSubmitValidation:
         path = tmp_path / "huge.json"
         path.write_text(json.dumps(document), encoding="utf-8")
         result = runner.invoke(
-            app, ["submit", "--dag", str(path), "--validate-only"], env=blank_env()
+            app, ["submit", "--dry-run", str(path), "--validate-only"], env=blank_env()
         )
         assert result.exit_code == ExitCode.OK
 
@@ -897,7 +905,7 @@ class TestSubmitValidation:
         path = tmp_path / "v2.json"
         path.write_text(json.dumps(document), encoding="utf-8")
         result = runner.invoke(
-            app, ["submit", "--dag", str(path), "--validate-only"], env=blank_env()
+            app, ["submit", "--dry-run", str(path), "--validate-only"], env=blank_env()
         )
         assert result.exit_code == ExitCode.OK
         assert "major versions differ" in result.output
@@ -908,7 +916,7 @@ class TestSubmitValidation:
         """A corrupted contract is a contract bug, and must not be blamed on the DAG."""
         result = runner.invoke(
             app,
-            ["submit", "--dag", str(valid_dag), "--validate-only"],
+            ["submit", "--dry-run", str(valid_dag), "--validate-only"],
             env=blank_env(HPCCTL_SCHEMA_PATH=str(tmp_path / "nope.json")),
         )
         assert result.exit_code == ExitCode.CONFIG
@@ -920,7 +928,9 @@ class TestEnvironmentMatrix:
     def test_everything_unset_yields_placeholders_and_exit_zero(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
-        result = runner.invoke(app, ["boot"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run")))
+        result = runner.invoke(
+            app, ["boot", "--dry-run"], env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run"))
+        )
         assert result.exit_code == ExitCode.OK
         assert "<<<UNSET:" in result.stdout
 
@@ -931,7 +941,7 @@ class TestEnvironmentMatrix:
             assert name in result.output
 
     def test_strict_is_fatal_in_dry_run(self, runner: CliRunner) -> None:
-        result = runner.invoke(app, ["boot", "--strict"], env=blank_env())
+        result = runner.invoke(app, ["boot", "--dry-run", "--strict"], env=blank_env())
         assert result.exit_code == ExitCode.CONFIG
 
     @pytest.mark.parametrize("value", ["", "   ", "\t", "\n"])
@@ -957,12 +967,12 @@ class TestEnvironmentMatrix:
         resolved = load_settings(live=False)
         assert resolved.compute_subnet_id == "subnet-00000000000000000"
 
-    @pytest.mark.parametrize("variable", ["HPCCTL_MIN_NODES", "HPCCTL_MAX_NODES", "HPCCTL_NTASKS"])
+    @pytest.mark.parametrize("variable", ["HPCCTL_MIN_NODES", "HPCCTL_MAX_NODES", "HPCCTL_NODES"])
     def test_non_integer_numeric_values_are_fatal_even_in_dry_run(
         self, runner: CliRunner, variable: str
     ) -> None:
         """Present and wrong is a typo, not an absent AWS account, so it fails in both modes."""
-        result = runner.invoke(app, ["boot"], env=blank_env(**{variable: "lots"}))
+        result = runner.invoke(app, ["boot", "--dry-run"], env=blank_env(**{variable: "lots"}))
         assert result.exit_code == ExitCode.CONFIG
         assert "Traceback" not in result.stdout
 
@@ -977,9 +987,8 @@ class TestExitCodeContract:
             ["boot", "--execute"],
             ["boot", "--strict"],
             ["deploy", "--build-dir", str(tmp_path / "absent")],
-            ["submit", "--dag", str(bad)],
+            ["submit", str(bad)],
             ["destroy", "--execute"],
-            ["status", "--watch"],
         ]
         for argv in invocations:
             result = runner.invoke(app, argv, env=blank_env(**LIVE_ENV), input="")
@@ -989,10 +998,6 @@ class TestExitCodeContract:
     def test_every_code_is_distinct(self) -> None:
         values = [member.value for member in ExitCode]
         assert len(values) == len(set(values))
-
-    def test_watch_is_refused_in_dry_run(self, runner: CliRunner) -> None:
-        result = runner.invoke(app, ["status", "--watch"], env=blank_env())
-        assert result.exit_code != ExitCode.OK
 
     def test_missing_tools_exit_five_not_one(self, runner: CliRunner, tmp_path: Path) -> None:
         """``pcluster`` and ``aws`` are not installed here, which is the whole premise."""
@@ -1007,14 +1012,14 @@ class TestExitCodeContract:
 class TestNoTasksDependency:
     """P4. hpcctl validates the contract, not the builder."""
 
-    def test_cli_import_pulls_in_neither_tasks_nor_numpy_nor_click(self) -> None:
+    def test_cli_import_pulls_in_neither_vmath_nor_numpy_nor_click(self) -> None:
         completed = subprocess.run(
             [
                 "python",
                 "-c",
                 "import sys, hpcctl.cli;"
                 "banned=[m for m in sys.modules if m.split('.')[0] in "
-                "{'tasks','numpy','click'}];"
+                "{'vmath','numpy','click'}];"
                 "print(banned)",
             ],
             capture_output=True,
@@ -1025,7 +1030,7 @@ class TestNoTasksDependency:
         assert completed.returncode == 0, completed.stderr
         assert completed.stdout.strip() == "[]", completed.stdout
 
-    @pytest.mark.parametrize("banned", ["tasks", "numpy", "click"])
+    @pytest.mark.parametrize("banned", ["vmath", "numpy", "click"])
     def test_no_module_imports_the_banned_packages(self, banned: str) -> None:
         pattern = re.compile(rf"^\s*(import|from)\s+{banned}\b", re.M)
         for path in _python_sources():
@@ -1071,7 +1076,7 @@ class TestJobNameValidationRegression:
     ) -> None:
         result = runner.invoke(
             app,
-            ["submit", "--dag", str(valid_dag), "--job-name", hostile],
+            ["submit", "--dry-run", str(valid_dag), "--job-name", hostile],
             env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run")),
         )
         assert result.exit_code == ExitCode.CONFIG
@@ -1083,7 +1088,7 @@ class TestJobNameValidationRegression:
         run_dir = tmp_path / "run"
         runner.invoke(
             app,
-            ["submit", "--dag", str(valid_dag), "--job-name", "../ESCAPED"],
+            ["submit", "--dry-run", str(valid_dag), "--job-name", "../ESCAPED"],
             env=blank_env(HPCCTL_RUN_DIR=str(run_dir)),
         )
         assert not (tmp_path / "ESCAPED.sbatch.generated").exists()
@@ -1097,7 +1102,7 @@ class TestJobNameValidationRegression:
     ) -> None:
         result = runner.invoke(
             app,
-            ["submit", "--dag", str(valid_dag), "--job-name", acceptable],
+            ["submit", "--dry-run", str(valid_dag), "--job-name", acceptable],
             env=blank_env(HPCCTL_RUN_DIR=str(tmp_path / "run")),
         )
         assert result.exit_code == ExitCode.OK
@@ -1119,7 +1124,13 @@ class TestJobNameValidationRegression:
         run_dir = tmp_path / "run"
         runner.invoke(
             app,
-            ["submit", "--dag", str(valid_dag), "--job-name", "a\n#SBATCH --account=INJECTED"],
+            [
+                "submit",
+                "--dry-run",
+                str(valid_dag),
+                "--job-name",
+                "a\n#SBATCH --account=INJECTED",
+            ],
             env=blank_env(HPCCTL_RUN_DIR=str(run_dir)),
         )
         for artifact in run_dir.glob("*.sbatch.generated"):

@@ -1,0 +1,4 @@
+# uv workspace root: lets `uv run hpcctl ...` (and vmath tooling) work from the repo root
+# or any subdirectory, with one shared lockfile and virtual environment at the root.
+[tool.uv.workspace]
+members = ["hpcctl", "vmath"]

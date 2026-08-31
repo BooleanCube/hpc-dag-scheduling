@@ -128,11 +128,14 @@ def run(
         ) from exc
 
     if check and completed.returncode != 0:
+        # Fall back to stdout when stderr is empty: pcluster reports validation failures as
+        # JSON on *stdout*, and an error whose diagnostic text is captured but never surfaced
+        # sends the operator off to re-run the command by hand (observed on first live boot).
         raise ExternalCommandError(
             f"command failed with exit status {completed.returncode}: "
             f"{console.format_command(argv)}",
             returncode=completed.returncode,
-            stderr=(completed.stderr or "").strip(),
+            stderr=(completed.stderr or "").strip() or (completed.stdout or "").strip(),
         )
     return completed
 
@@ -165,6 +168,32 @@ def ssh_argv(
     ]
     if remote_command is not None:
         argv.append(remote_command)
+    return argv
+
+
+def scp_fetch_argv(
+    *, key_path: str, user: str, host: str, remote: str, local: str, recursive: bool = False
+) -> list[str]:
+    """Build an ``scp`` argument vector that downloads from the head node.
+
+    The remote path may contain a glob: scp hands it to the remote shell for expansion, which
+    is what lets one command fetch ``*-<jobid>.out`` without knowing the job's name.
+
+    Args:
+        key_path: Path to the private key.
+        user: Remote login user.
+        host: Remote hostname or IP.
+        remote: Remote source path or glob.
+        local: Local destination directory.
+        recursive: Copy directories recursively.
+
+    Returns:
+        The ``scp`` argument vector.
+    """
+    argv = ["scp", "-i", key_path, "-o", "StrictHostKeyChecking=accept-new"]
+    if recursive:
+        argv.append("-r")
+    argv.extend([f"{user}@{host}:{remote}", local])
     return argv
 
 

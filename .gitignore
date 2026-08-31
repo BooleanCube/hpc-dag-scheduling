@@ -96,7 +96,7 @@ aws_credentials
 *.yaml
 *.yml
 
-# /shared is the serialization contract between /tasks and /engine.
+# /shared is the serialization contract between /vmath and /engine.
 !/shared/**/*.json
 !/shared/**/*.yaml
 # CI definitions must be tracked.
@@ -157,6 +157,8 @@ Desktop.ini
 # ---------------------------------------------------------------------------
 slurm-*.out
 *.sbatch.generated
+# Local landing directory of `hpcctl result <job id>` downloads.
+results/
 # hpcctl's generated-artifact directory. Its contents are already ignored by
 # extension, but ignoring the directory makes that structural rather than
 # incidental -- otherwise the first .txt log written here becomes committable.

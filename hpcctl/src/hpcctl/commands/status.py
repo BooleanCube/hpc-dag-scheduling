@@ -8,7 +8,14 @@ from rich.table import Table
 
 from hpcctl import console
 from hpcctl.commands.options import DryRunOption, StrictOption, resolve_dry_run
-from hpcctl.config import REQUIRED_FOR_CLUSTER, REQUIRED_FOR_REMOTE, Settings, load_settings
+from hpcctl.config import (
+    REQUIRED_FOR_CLUSTER,
+    REQUIRED_FOR_REMOTE,
+    Settings,
+    is_placeholder,
+    load_settings,
+)
+from hpcctl.discovery import describe_argv, head_node_address
 from hpcctl.errors import ClusterStateError, HpcctlError
 from hpcctl.external import require_tools, run, ssh_argv
 
@@ -27,11 +34,10 @@ FAILED_STATES = frozenset(
 
 
 def status(
-    dry_run: DryRunOption = True,
+    dry_run: DryRunOption = False,
     queue: Annotated[
         bool, typer.Option("--queue/--no-queue", help="Include the Slurm queue.")
     ] = True,
-    watch: Annotated[bool, typer.Option("--watch", help="Re-render on an interval.")] = False,
     strict: StrictOption = False,
 ) -> None:
     """Report cluster and Slurm queue status.
@@ -40,29 +46,16 @@ def status(
     is printed with a warning and the exit status stays 0. A cluster that is still creating has no
     reachable head node yet, and that is normal rather than an error. Exit 8 is reserved for a
     cluster that is absent or in a failed state.
+
+    A ``--watch`` mode existed as a flag but was never wired to a render loop, so it was
+    removed rather than shipped as a silent no-op; use ``watch -n5 'hpcctl status'`` instead.
     """
     dry_run = resolve_dry_run(dry_run)
-    if watch and dry_run:
-        # typer.BadParameter rather than HpcctlError: this is an illegal combination of flags,
-        # so it belongs to Typer's exit code 2. Raising the base HpcctlError would exit 1, which
-        # the enum defines as "unexpected exception; always a bug" -- telling CI that hpcctl
-        # crashed when it in fact refused on purpose.
-        raise typer.BadParameter(
-            "--watch is not available in dry-run; output is static and it would loop forever. "
-            "Pass --execute to watch a real cluster.",
-            param_hint="--watch",
-        )
-
     required = REQUIRED_FOR_CLUSTER | (REQUIRED_FOR_REMOTE if queue else frozenset())
     settings = load_settings(live=not dry_run, strict=strict, required=required)
 
-    describe = _describe_argv(settings)
-    squeue = ssh_argv(
-        key_path=settings.ssh_key_path,
-        user=settings.ssh_user,
-        host=settings.head_node_host,
-        remote_command=f"squeue --format='{SQUEUE_FORMAT}'",
-    )
+    describe = describe_argv(settings)
+    squeue = _squeue_argv(settings, settings.head_node_host)
 
     if dry_run:
         console.render_artifact(
@@ -93,6 +86,14 @@ def status(
 
     if not queue:
         return
+    # The describe payload already names the head node, so an unset HPCCTL_HEAD_NODE_HOST is
+    # filled in from it here rather than by a second describe-cluster round trip.
+    if is_placeholder(settings.head_node_host):
+        discovered = head_node_address(payload)
+        if not discovered:
+            console.render_warning("queue unavailable: the cluster reports no head node address")
+            return
+        squeue = _squeue_argv(settings, discovered)
     try:
         require_tools("ssh")
         queue_result = run(squeue, dry_run=False)
@@ -103,23 +104,22 @@ def status(
     console.out().print(_queue_table(_parse_squeue(queue_result.stdout if queue_result else "")))
 
 
-def _describe_argv(settings: Settings) -> list[str]:
-    """Build the ``pcluster describe-cluster`` command.
+def _squeue_argv(settings: Settings, host: str) -> list[str]:
+    """Build the SSH command that reads the Slurm queue.
 
     Args:
-        settings: Resolved settings supplying the cluster name and region.
+        settings: Resolved settings supplying the SSH identity and Slurm location.
+        host: Head-node address, from the environment or from discovery.
 
     Returns:
-        The ``pcluster`` argument vector.
+        The ``ssh`` argument vector.
     """
-    return [
-        "pcluster",
-        "describe-cluster",
-        "--cluster-name",
-        settings.cluster_name,
-        "--region",
-        settings.region,
-    ]
+    return ssh_argv(
+        key_path=settings.ssh_key_path,
+        user=settings.ssh_user,
+        host=host,
+        remote_command=f"{settings.slurm_bin}/squeue --format='{SQUEUE_FORMAT}'",
+    )
 
 
 def _parse_describe(stdout: str) -> dict[str, Any]:
@@ -137,7 +137,7 @@ def _parse_describe(stdout: str) -> dict[str, Any]:
     if not stdout.strip():
         raise ClusterStateError(
             "pcluster describe-cluster returned no output",
-            hint="Does the cluster exist? Create it with 'hpcctl boot --execute'.",
+            hint="Does the cluster exist? Create it with 'hpcctl boot'.",
         )
     try:
         payload = json.loads(stdout)

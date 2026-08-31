@@ -98,7 +98,7 @@ class TestDirectivePlacement:
 
     def test_no_directive_appears_after_srun(self, script: str) -> None:
         lines = script.splitlines()
-        srun_index = next(i for i, line in enumerate(lines) if line.startswith("srun"))
+        srun_index = next(i for i, line in enumerate(lines) if "/srun " in line)
         assert not any(line.startswith(SBATCH_PREFIX) for line in lines[srun_index:])
 
 
@@ -123,8 +123,9 @@ class TestDirectiveContent:
         assert f"{SBATCH_PREFIX}--partition=compute" in directives
 
     def test_defaults_from_the_environment(self, script: str) -> None:
-        assert f"{SBATCH_PREFIX}--nodes=2" in script
-        assert f"{SBATCH_PREFIX}--ntasks=4" in script
+        assert f"{SBATCH_PREFIX}--nodes=1" in script
+        # ranks are always nodes + 1: the scheduler shares the first instance with a worker
+        assert f"{SBATCH_PREFIX}--ntasks=2" in script
         assert f"{SBATCH_PREFIX}--time=00:30:00" in script
 
     def test_log_paths_land_in_the_remote_dag_dir(self, script: str) -> None:
@@ -154,8 +155,9 @@ class TestOverrides:
 
 
 class TestExecution:
-    def test_uses_srun_with_pmix(self, script: str) -> None:
-        assert "srun --mpi=pmix " in script
+    def test_uses_srun_with_pmix_by_absolute_path(self, script: str) -> None:
+        """Absolute because sbatch propagates the submitting ssh's Slurm-less PATH into the job."""
+        assert "/opt/slurm/bin/srun --mpi=pmix " in script
 
     def test_invokes_the_resolved_engine_binary(self, script: str) -> None:
         assert "/shared/engine/bin/engine" in script
@@ -166,7 +168,7 @@ class TestExecution:
     def test_engine_binary_honours_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HPCCTL_ENGINE_BINARY", "/opt/bin/engine")
         script = render_sbatch(load_settings(live=False), dag_remote_path="/d/x.json", job_name="x")
-        assert "srun --mpi=pmix /opt/bin/engine --dag /d/x.json" in script
+        assert "/srun --mpi=pmix --distribution=cyclic /opt/bin/engine --dag /d/x.json" in script
 
     def test_shared_dir_propagates_to_every_remote_path(
         self, monkeypatch: pytest.MonkeyPatch

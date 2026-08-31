@@ -143,7 +143,7 @@ def render_placeholder_warning(settings: Settings) -> None:
         Panel(
             f"These variables are unset and were replaced with placeholders:\n{listed}\n\n"
             "Dry-run output is still structurally valid, but no AWS API would accept it.\n"
-            "Set them (see hpcctl/.env.example) before using --execute.",
+            "Set them (see hpcctl/.env.example) before running without --dry-run.",
             title="incomplete configuration",
             border_style="yellow",
         )

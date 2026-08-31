@@ -2,6 +2,7 @@
 
 import dataclasses
 import re
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -10,6 +11,7 @@ import typer
 from hpcctl import console
 from hpcctl.commands.options import DryRunOption, RawOption, StrictOption, resolve_dry_run
 from hpcctl.config import REQUIRED_FOR_REMOTE, Settings, load_settings
+from hpcctl.discovery import resolve_head_node
 from hpcctl.errors import ExternalCommandError, InvalidConfigError
 from hpcctl.external import require_tools, run, scp_argv, ssh_argv
 from hpcctl.generators.sbatch import remote_dag_path, remote_sbatch_path, render_sbatch
@@ -27,32 +29,66 @@ becomes a filename under the run directory, a path inside a remote command strin
 hands to a shell, and literal text in the ``#SBATCH`` directive block.
 """
 
-DagOption = Annotated[
+DagArgument = Annotated[
     Path,
-    typer.Option(exists=True, dir_okay=False, readable=True, help="Serialized DAG JSON file."),
+    typer.Argument(
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="A Python case script that builds a DAG (compiled automatically), "
+        "or an already-serialized DAG JSON file.",
+        show_default=False,
+    ),
 ]
 
 
 def submit(
-    dag: DagOption,
-    dry_run: DryRunOption = True,
+    dag: DagArgument,
+    dry_run: DryRunOption = False,
     validate_only: Annotated[
         bool, typer.Option("--validate-only", help="Validate the DAG and stop. Fully local.")
     ] = False,
     job_name: Annotated[str | None, typer.Option(help="Slurm job name.")] = None,
-    nodes: Annotated[int | None, typer.Option(help="Override HPCCTL_NODES.")] = None,
-    ntasks: Annotated[int | None, typer.Option(help="Override HPCCTL_NTASKS.")] = None,
+    nodes: Annotated[
+        int | None,
+        typer.Option(
+            "--nodes",
+            "-n",
+            help="Compute instances to run on, within the queue's node bounds (default 1). "
+            "MPI ranks default to this plus one: the scheduler rank shares an instance with "
+            "one worker so no machine sits idle.",
+        ),
+    ] = None,
+    ntasks: Annotated[
+        int | None, typer.Option(help="Override the derived rank count (nodes + 1).")
+    ] = None,
     time_limit: Annotated[str | None, typer.Option(help="Override HPCCTL_TIME_LIMIT.")] = None,
     strict: StrictOption = False,
     raw: RawOption = False,
 ) -> None:
-    """Validate a serialized DAG and submit it to Slurm as a batch job.
+    """Compile and validate a DAG, then submit it to Slurm as a batch job.
 
-    Validation always runs first, in every mode: an invalid DAG must never reach the cluster, and
+    A ``.py`` argument is a case script: it is run first (see :func:`_compile_case`) and the
+    document it writes is what proceeds. Anything else is treated as an already-serialized
+    DAG JSON file.
+
+    Validation always runs next, in every mode: an invalid DAG must never reach the cluster, and
     ``--validate-only`` is the fastest useful thing this CLI can do without an AWS account.
+
+    Geometry: ``-n N`` requests N compute instances and N+1 MPI ranks. Slurm's cyclic placement
+    gives every instance one worker and wraps the highest rank (the scheduler, by engine
+    convention) onto the first instance, so the scheduler shares a machine with exactly one
+    worker rather than wasting a whole instance.
     """
     dry_run = resolve_dry_run(dry_run)
-    settings = load_settings(live=not dry_run, strict=strict, required=REQUIRED_FOR_REMOTE)
+    # --validate-only is a purely local operation, so it must not demand live-only
+    # configuration (or discovery) even though the command now defaults to --execute.
+    settings = load_settings(
+        live=not dry_run and not validate_only, strict=strict, required=REQUIRED_FOR_REMOTE
+    )
+
+    if dag.suffix == ".py":
+        dag = _compile_case(dag, settings, raw=raw)
 
     document = validate_dag_file(dag, schema_path=settings.schema_path)
     warning = check_version_compatibility(document, load_schema(settings.schema_path))
@@ -66,7 +102,9 @@ def submit(
     if validate_only:
         return
 
+    settings = resolve_head_node(settings, dry_run=dry_run)
     effective = _with_overrides(settings, nodes=nodes, ntasks=ntasks, time_limit=time_limit)
+    _checked_nodes(effective)
     dag_remote = remote_dag_path(effective, dag.name)
     script = render_sbatch(effective, dag_remote_path=dag_remote, job_name=resolved_name)
 
@@ -75,6 +113,15 @@ def submit(
     script_path.write_text(script, encoding="utf-8")
 
     script_remote = remote_sbatch_path(effective, resolved_name)
+    # scp cannot create the destination directory, and a freshly booted cluster's shared
+    # volume is empty -- without this the very first submit fails with "No such file or
+    # directory" (observed on first live run).
+    make_dir = ssh_argv(
+        key_path=effective.ssh_key_path,
+        user=effective.ssh_user,
+        host=effective.head_node_host,
+        remote_command=f"mkdir -p {effective.remote_dag_dir}",
+    )
     copy_dag = scp_argv(
         key_path=effective.ssh_key_path,
         local=str(dag),
@@ -93,7 +140,7 @@ def submit(
         key_path=effective.ssh_key_path,
         user=effective.ssh_user,
         host=effective.head_node_host,
-        remote_command=f"sbatch {script_remote}",
+        remote_command=f"{effective.slurm_bin}/sbatch {script_remote}",
     )
 
     if dry_run:
@@ -104,13 +151,17 @@ def submit(
         console.render_notice(f"artifact written to {script_path}")
         console.render_artifact(
             "staging and submission (bash)",
-            "\n".join(console.format_command(argv) for argv in (copy_dag, copy_script, submit_cmd)),
+            "\n".join(
+                console.format_command(argv)
+                for argv in (make_dir, copy_dag, copy_script, submit_cmd)
+            ),
             "bash",
         )
         console.render_placeholder_warning(effective)
         return
 
     require_tools("scp", "ssh")
+    run(make_dir, dry_run=False)
     run(copy_dag, dry_run=False)
     run(copy_script, dry_run=False)
     completed = run(submit_cmd, dry_run=False)
@@ -128,6 +179,48 @@ def submit(
     console.render_notice(f"submitted job {match.group(1)} as {resolved_name!r}")
 
 
+def _compile_case(script: Path, settings: Settings, *, raw: bool) -> Path:
+    """Run a Python case script and return the DAG document it wrote.
+
+    The contract (implemented by ``vmath.emit``): the script is executed with the destination
+    path as its first argument and must serialize exactly one graph there. Running the script
+    in a subprocess rather than importing it keeps hpcctl on the right side of its own design
+    rule -- the CLI validates serialized documents and never imports the builder.
+
+    Compilation happens in every mode, dry-run included: it is local and free, and neither
+    validation nor the sbatch preview is possible without the document. It is the one
+    deliberate exception to "dry-run executes nothing" -- the interpreter running this very
+    process, never a remote or AWS-touching tool.
+
+    Args:
+        script: The case script.
+        settings: Resolved settings supplying the run directory.
+        raw: Suppress the compilation notice, keeping ``--raw`` output byte-exact.
+
+    Returns:
+        Path of the compiled document, ``<run_dir>/<script stem>.json``.
+
+    Raises:
+        ExternalCommandError: If the script exits non-zero (a ``DagBuildError`` traceback
+            lands on its stderr and is surfaced).
+        InvalidConfigError: If the script exits zero without writing the document.
+    """
+    settings.run_dir.mkdir(parents=True, exist_ok=True)
+    target = settings.run_dir / f"{script.stem}.json"
+    run([sys.executable, str(script), str(target)], dry_run=False, capture=True)
+    if not target.is_file():
+        raise InvalidConfigError(
+            f"case script wrote no DAG document: {script}",
+            hint=(
+                "A case script must end with vmath.emit(graph), which writes to the path "
+                "hpcctl passes as the script's first argument."
+            ),
+        )
+    if not raw:
+        console.render_notice(f"compiled {script} -> {target}")
+    return target
+
+
 def _with_overrides(
     settings: Settings,
     *,
@@ -138,22 +231,52 @@ def _with_overrides(
     """Apply CLI overrides on top of environment-derived job geometry.
 
     Job geometry is what a user tunes per experiment, so the flags win over the environment.
+    The rank count is a *function of the instance count* — one scheduler plus one worker per
+    instance, ``N + 1`` ranks on ``N`` nodes — so overriding ``-n`` re-derives it. An explicit
+    ``--ntasks`` wins over the derivation for irregular experiments.
 
     Args:
         settings: Environment-derived settings.
-        nodes: Node-count override, or ``None`` to keep the configured value.
-        ntasks: Task-count override, or ``None``.
+        nodes: Instance-count override, or ``None`` to keep the configured value.
+        ntasks: Rank-count override, or ``None`` to derive ``nodes + 1``.
         time_limit: Wall-clock override, or ``None``.
 
     Returns:
         A new settings value; the original is frozen and untouched.
     """
+    effective_nodes = nodes if nodes is not None else settings.nodes
     return dataclasses.replace(
         settings,
-        nodes=nodes if nodes is not None else settings.nodes,
-        ntasks=ntasks if ntasks is not None else settings.ntasks,
+        nodes=effective_nodes,
+        ntasks=ntasks if ntasks is not None else effective_nodes + 1,
         time_limit=time_limit if time_limit is not None else settings.time_limit,
     )
+
+
+def _checked_nodes(settings: Settings) -> None:
+    """Reject an instance count the cluster's queue cannot satisfy.
+
+    Slurm would accept a request beyond ``MaxCount`` and leave the job pending forever waiting
+    for instances that will never scale out, so the mismatch is cheapest to catch here. The
+    floor is at least 1 regardless of ``HPCCTL_MIN_NODES``: a MinCount of 0 is a scale-to-zero
+    idle policy, not a valid job size.
+
+    Args:
+        settings: Effective settings, after CLI overrides.
+
+    Raises:
+        InvalidConfigError: If the count falls outside the queue's node bounds.
+    """
+    floor = max(settings.min_nodes, 1)
+    if not floor <= settings.nodes <= settings.max_nodes:
+        raise InvalidConfigError(
+            f"requested {settings.nodes} node(s), but the queue allows "
+            f"{floor} to {settings.max_nodes}",
+            hint=(
+                "Pass -n within the queue's bounds, or change HPCCTL_MIN_NODES / "
+                "HPCCTL_MAX_NODES and re-boot the cluster."
+            ),
+        )
 
 
 def _checked_job_name(name: str) -> str:

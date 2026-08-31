@@ -50,7 +50,7 @@ def raw_boot(runner: CliRunner) -> dict[str, str]:
     Returns:
         A mapping of artifact name to body.
     """
-    result = runner.invoke(app, ["boot", "--raw"], env=blank_env())
+    result = runner.invoke(app, ["boot", "--dry-run", "--raw"], env=blank_env())
     assert result.exit_code == 0, result.stderr
     return split_artifacts(result.stdout)
 
@@ -86,12 +86,12 @@ class TestRawIsPipeable:
         assert url.endswith(".sh")
 
     def test_stdout_carries_no_ansi_escapes(self, runner: CliRunner) -> None:
-        result = runner.invoke(app, ["boot", "--raw"], env=blank_env())
+        result = runner.invoke(app, ["boot", "--dry-run", "--raw"], env=blank_env())
         assert "\x1b[" not in result.stdout
 
     def test_warnings_stay_on_stderr(self, runner: CliRunner) -> None:
         """Stdout must stay clean enough to pipe even when config is incomplete."""
-        result = runner.invoke(app, ["boot", "--raw"], env=blank_env())
+        result = runner.invoke(app, ["boot", "--dry-run", "--raw"], env=blank_env())
         assert "<<<UNSET:" in result.stdout  # inside the config body, as a value
         assert split_artifacts(result.stdout)["bootstrap"] == bootstrap_text()
 
@@ -102,7 +102,9 @@ class TestRawIsPipeable:
     def test_submit_raw_emits_only_the_batch_script(
         self, runner: CliRunner, valid_dag: Path
     ) -> None:
-        result = runner.invoke(app, ["submit", "--dag", str(valid_dag), "--raw"], env=blank_env())
+        result = runner.invoke(
+            app, ["submit", "--dry-run", str(valid_dag), "--raw"], env=blank_env()
+        )
         assert result.exit_code == 0
         artifacts = split_artifacts(result.stdout)
         assert set(artifacts) == {"sbatch"}
@@ -110,7 +112,9 @@ class TestRawIsPipeable:
     def test_submit_raw_passes_bash_syntax_check(
         self, runner: CliRunner, valid_dag: Path, tmp_path: Path
     ) -> None:
-        result = runner.invoke(app, ["submit", "--dag", str(valid_dag), "--raw"], env=blank_env())
+        result = runner.invoke(
+            app, ["submit", "--dry-run", str(valid_dag), "--raw"], env=blank_env()
+        )
         path = tmp_path / "piped.sbatch"
         path.write_text(split_artifacts(result.stdout)["sbatch"], encoding="utf-8")
         check = subprocess.run(
@@ -123,7 +127,7 @@ class TestRichIsLossy:
     """The negative control: rendered output is not the artifact."""
 
     def test_rendered_bootstrap_is_not_byte_identical(self, runner: CliRunner) -> None:
-        result = runner.invoke(app, ["--no-color", "boot"], env=blank_env())
+        result = runner.invoke(app, ["--no-color", "boot", "--dry-run"], env=blank_env())
         assert result.exit_code == 0
         assert bootstrap_text() not in result.stdout
 
@@ -153,8 +157,8 @@ class TestRichIsLossy:
             assert package in rendered
 
     def test_raw_and_rendered_differ_for_the_same_artifact(self, runner: CliRunner) -> None:
-        raw = runner.invoke(app, ["boot", "--raw"], env=blank_env()).stdout
-        pretty = runner.invoke(app, ["--no-color", "boot"], env=blank_env()).stdout
+        raw = runner.invoke(app, ["boot", "--dry-run", "--raw"], env=blank_env()).stdout
+        pretty = runner.invoke(app, ["--no-color", "boot", "--dry-run"], env=blank_env()).stdout
         assert raw != pretty
 
     def test_artifacts_are_never_wrapped_in_a_panel(self) -> None:

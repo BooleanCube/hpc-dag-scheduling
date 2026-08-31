@@ -138,6 +138,13 @@ class TestRun:
             run(["noisy"], dry_run=False)
         assert "went wrong" in excinfo.value.stderr
 
+    def test_stdout_is_carried_when_stderr_is_empty(self, fake_bin: Path) -> None:
+        """Pcluster reports validation failures as JSON on stdout (observed on first live boot)."""
+        install(fake_bin, "stdout-failer", "echo 'Invalid cluster configuration.'; exit 1")
+        with pytest.raises(ExternalCommandError) as excinfo:
+            run(["stdout-failer"], dry_run=False)
+        assert "Invalid cluster configuration." in excinfo.value.stderr
+
     def test_missing_executable_becomes_tool_missing(self) -> None:
         """Exit 5, not a raw FileNotFoundError traceback."""
         with pytest.raises(ToolMissingError):

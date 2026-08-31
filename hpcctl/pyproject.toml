@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "booleancube", email = "samarthupadhya2309@gmail.com" }
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "jsonschema>=4.26.0",
     "pyyaml>=6.0.3",
@@ -33,7 +33,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 extend-exclude = [".venv"]
 
 [tool.ruff.lint]
@@ -52,7 +52,9 @@ docstring-code-format = true
 
 [tool.mypy]
 strict = true
-python_version = "3.11"
+# 3.12, not 3.11: numpy lives in the workspace venv for /vmath, pytest's approx() imports it
+# when present, and numpy 2.x stubs use PEP 695 `type` statements that only parse at 3.12+.
+python_version = "3.12"
 exclude = ['^\.venv/']
 
 [tool.pytest.ini_options]

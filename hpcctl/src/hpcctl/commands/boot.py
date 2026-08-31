@@ -21,7 +21,7 @@ from hpcctl.generators.cluster_config import create_cluster_argv, render_cluster
 
 
 def boot(
-    dry_run: DryRunOption = True,
+    dry_run: DryRunOption = False,
     strict: StrictOption = False,
     emit_dir: EmitDirOption = None,
     raw: RawOption = False,
@@ -64,9 +64,7 @@ def boot(
     completed = run(create, dry_run=False)
     if completed is not None and completed.stdout:
         console.out().print(completed.stdout.strip())
-    console.render_notice(
-        "cluster creation is asynchronous; poll it with 'hpcctl status --execute'"
-    )
+    console.render_notice("cluster creation is asynchronous; poll it with 'hpcctl status'")
 
 
 def _print_plan(

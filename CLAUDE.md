@@ -2,10 +2,11 @@
 
 ## 1. PROJECT SCOPE & ARCHITECTURE
 We are building a research baseline to study optimal task scheduling of mathematical Directed Acyclic Graphs (DAGs) across an HPC cluster. 
-- `/engine`: C++ MPI application. **STRICTLY READ-ONLY FOR CLAUDE.** Humans write this.
+- `/engine`: C++ MPI application. Humans write this.
 - `/hpcctl`: Python CLI (built with Typer/Click & `uv`) to manage AWS ParallelCluster lifecycles.
-- `/tasks`: Python library (built with `uv`) containing the DAG math builder, node operations, and the actual task definition scripts.
-- `/shared`: The serialization contract (JSON/Protobuf) linking `/tasks` to `/engine`.
+- `/vmath`: Python library (built with `uv`) containing the DAG math builder, node operations, and the actual task definition scripts.
+- `/cases`: Benchmark DAG scripts (written against `/vmath`) that `hpcctl submit` compiles and runs.
+- `/shared`: The serialization contract (JSON/Protobuf) linking `/vmath` to `/engine`.
 
 ## 2. STRICT PYTHON ENGINEERING STANDARDS
 - **Package Manager:** Use `uv` exclusively for dependency management, environments, and running scripts (`uv run`, `uv add`).
@@ -14,8 +15,8 @@ We are building a research baseline to study optimal task scheduling of mathemat
 - **No Side Effects:** AWS commands MUST support a `--dry-run` flag that prints intended payloads instead of executing them.
 
 ## 3. EXCEPTION HANDLING PROTOCOL (CRITICAL)
-We use a "Lazy Evaluation" architecture similar to Polars. The Python `/tasks` builder MUST catch all logical errors before the engine ever sees the DAG.
-**Python (`/tasks`) MUST raise custom exceptions for:**
+We use a "Lazy Evaluation" architecture similar to Polars. The Python `/vmath` builder MUST catch all logical errors before the engine ever sees the DAG.
+**Python (`/vmath`) MUST raise custom exceptions for:**
 - `ShapeMismatchError`: Matrix dimensions do not align for the specific mathematical operation (e.g., N x M dot M x P).
 - `DimensionalityError`: Operation called on wrong tensor rank (e.g., cross product on 2D matrix).
 - `CyclicDependencyError`: Graph is not a valid DAG.

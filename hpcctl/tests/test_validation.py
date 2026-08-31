@@ -1,6 +1,6 @@
 """Tests for DAG validation against the /shared contract.
 
-``hpcctl`` validates the contract, not the builder: these tests must never import ``tasks``.
+``hpcctl`` validates the contract, not the builder: these tests must never import ``vmath``.
 Fixtures are hand-written documents, so a bug in the Python builder cannot mask a bug here.
 """
 
@@ -39,8 +39,8 @@ def write(tmp_path: Path, document: Any, name: str = "dag.json") -> Path:
 
 
 class TestDoesNotDependOnTasks:
-    def test_tasks_is_not_imported_by_hpcctl(self) -> None:
-        """Importing tasks would drag NumPy into a tool that manages EC2 instances."""
+    def test_vmath_is_not_imported_by_hpcctl(self) -> None:
+        """Importing vmath would drag NumPy into a tool that manages EC2 instances."""
         import subprocess
         import sys
 
@@ -49,7 +49,7 @@ class TestDoesNotDependOnTasks:
                 sys.executable,
                 "-c",
                 "import hpcctl.validation, sys; "
-                "print('tasks' in sys.modules or 'numpy' in sys.modules)",
+                "print('vmath' in sys.modules or 'numpy' in sys.modules)",
             ],
             capture_output=True,
             text=True,

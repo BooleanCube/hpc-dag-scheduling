@@ -56,8 +56,24 @@ def render_sbatch(settings: Settings, *, dag_remote_path: str, job_name: str) ->
         "",
         "set -euo pipefail",
         "",
+        # The job runs with its working directory set to a per-job result directory on the
+        # shared filesystem, so anything the engine writes to its cwd is collected later by
+        # `hpcctl result <job id>` without the engine needing to know about paths.
+        f'RESULT_DIR="{settings.remote_dag_dir}/results/${{SLURM_JOB_ID}}"',
+        'mkdir -p "${RESULT_DIR}"',
+        'cd "${RESULT_DIR}"',
+        "",
         'echo "job ${SLURM_JOB_ID} on ${SLURM_JOB_NUM_NODES} node(s), ${SLURM_NTASKS} task(s)"',
-        f"srun --mpi=pmix {settings.engine_binary} --dag {dag_remote_path}",
+        # srun by absolute path: sbatch propagates the *submitting* environment into the job,
+        # and hpcctl submits over a non-interactive ssh whose PATH lacks Slurm's bin directory.
+        # Observed live as "srun: command not found" on an otherwise healthy job.
+        #
+        # --distribution=cyclic pins the placement the geometry relies on: with N+1 ranks on
+        # N nodes, round-robin gives every node one worker and wraps the final rank -- the
+        # scheduler, by engine convention the highest rank -- back onto the first node, so the
+        # scheduler shares an instance with exactly one worker and no machine idles under it.
+        f"{settings.slurm_bin}/srun --mpi=pmix --distribution=cyclic "
+        f"{settings.engine_binary} --dag {dag_remote_path}",
         "",
     ]
     return "\n".join(lines)
@@ -74,6 +90,22 @@ def remote_dag_path(settings: Settings, dag_filename: str) -> str:
         The absolute remote path.
     """
     return f"{settings.remote_dag_dir}/{dag_filename}"
+
+
+def remote_results_dir(settings: Settings, job_id: str) -> str:
+    """Return the shared-filesystem directory one job's engine outputs land in.
+
+    Must mirror the ``RESULT_DIR`` the batch script computes from ``SLURM_JOB_ID``: this is
+    the read side of that convention, used by ``hpcctl result``.
+
+    Args:
+        settings: Resolved settings supplying the remote DAG directory.
+        job_id: Numeric Slurm job ID.
+
+    Returns:
+        The absolute remote directory path.
+    """
+    return f"{settings.remote_dag_dir}/results/{job_id}"
 
 
 def remote_sbatch_path(settings: Settings, job_name: str) -> str:
